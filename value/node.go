@@ -14,8 +14,9 @@
 
 package value
 
-// NodeBlueprint represents the configration for a Couchbase Cluster node.
+// NodeBlueprint represents the configuration for a Couchbase Cluster node.
 type NodeBlueprint struct {
-	Host     string `json:"host,omitempty" yaml:"host,omitempty"`
-	DataPath string `json:"-" yaml:"data_path,omitempty"`
+	Host      string `json:"host,omitempty" yaml:"host,omitempty"`
+	DataPath  string `json:"-" yaml:"data_path,omitempty"`
+	IndexPath string `json:"-" yaml:"index_path,omitempty"`
 }

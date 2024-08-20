@@ -41,6 +41,11 @@ func NewBackupClient(config *value.SSHConfig, blueprint *value.BackupClientBluep
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to connect to node")
 	}
+	//
+	// err = node.checkAndPartitionEBS()
+	// if err != nil {
+	// 	return nil, errors.Wrap(err, "failed to check and partition EBS")
+	// }
 
 	return &BackupClient{
 		blueprint: blueprint,
@@ -260,7 +265,7 @@ func (b *BackupClient) benchmarkRestore(config *value.BenchmarkConfig,
 	return result, nil
 }
 
-// configureRepository wil run the config sub-command to create a new backup repository.
+// configureRepository will run the config sub-command to create a new backup repository.
 func (b *BackupClient) createRepository(config *value.BenchmarkConfig) error {
 	log.Info("Creating repository")
 
@@ -289,6 +294,7 @@ func (b *BackupClient) createBackup(config *value.BenchmarkConfig, cluster *Clus
 
 	log.WithFields(fields).Info("Creating backup")
 
+	fmt.Printf("cluster.ConnectionString(): %s\n", cluster.ConnectionString())
 	_, err := b.node.client.ExecuteCommand(config.CBMConfig.CommandBackup(cluster.ConnectionString(), ignoreBlackhole))
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to run backup")

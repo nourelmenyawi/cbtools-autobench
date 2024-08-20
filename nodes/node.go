@@ -16,8 +16,8 @@ package nodes
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/jamesl33/cbtools-autobench/ssh"
@@ -44,7 +44,7 @@ func NewNode(config *value.SSHConfig, blueprint *value.NodeBlueprint) (*Node, er
 }
 
 // provision the node by installing the required dependencies (including Couchbase Server).
-func (n *Node) provision(path string) error {
+func (n *Node) provision(packagePath string) error {
 	err := n.installDeps()
 	if err != nil {
 		return errors.Wrap(err, "failed to install dependencies")
@@ -55,13 +55,18 @@ func (n *Node) provision(path string) error {
 		return errors.Wrap(err, "failed to uninstall Couchbase Server")
 	}
 
-	err = n.installCB(path)
+	err = n.installCB(packagePath)
 	if err != nil {
 		return errors.Wrap(err, "failed to install Couchbase Server")
 	}
 
 	// We've got to wait for things to complete, for example we need to actually wait for Couchbase Server to start
 	time.Sleep(30 * time.Second)
+
+	err = n.giveCBPermissions()
+	if err != nil {
+		return errors.Wrap(err, "failed to give Couchbase Server permissions")
+	}
 
 	return nil
 }
@@ -96,13 +101,17 @@ func (n *Node) uninstallCB() error {
 //
 // NOTE: The package archive will be removed upon completion.
 func (n *Node) installCB(localPath string) error {
-	remotePath := filepath.Join(os.TempDir(), filepath.Base(localPath))
+	remotePath := filepath.Join("/home/ec2-user", filepath.Base(localPath))
 
 	log.WithField("host", n.blueprint.Host).Info("Uploading package archive")
 
 	err := n.client.SecureUpload(localPath, remotePath)
-	if err != nil {
+	switch {
+	case err != nil:
 		return errors.Wrap(err, "failed to upload package archive")
+	case errors.Is(err, fmt.Errorf("File already exists")):
+		log.WithField("host", n.blueprint.Host).Info("Package archive already exists")
+		return nil
 	}
 
 	log.WithField("host", n.blueprint.Host).Info("Installing 'couchbase-server'")
@@ -143,14 +152,43 @@ func (n *Node) createDataPath() error {
 	return nil
 }
 
+func (n *Node) createIndexPath() error {
+	if n.blueprint.IndexPath == "" {
+		return nil
+	}
+
+	log.WithField("host", n.blueprint.Host).Info("Creating/configuring index path")
+
+	_, err := n.client.ExecuteCommand(value.NewCommand("mkdir -p %s", n.blueprint.IndexPath))
+	if err != nil {
+		return errors.Wrap(err, "failed to create remote index directory")
+	}
+
+	_, err = n.client.ExecuteCommand(value.NewCommand("chown -R couchbase:couchbase %s", n.blueprint.IndexPath))
+	if err != nil {
+		return errors.Wrap(err, "failed to chown remote index directory")
+	}
+
+	return nil
+}
+
 // initializeCB will perform node level initialization of Couchbase Server.
 func (n *Node) initializeCB() error {
-	fields := log.Fields{"host": n.blueprint.Host, "data_path": n.blueprint.DataPath}
+	fields := log.Fields{
+		"host":       n.blueprint.Host,
+		"data_path":  n.blueprint.DataPath,
+		"index_path": n.blueprint.IndexPath,
+	}
+
 	log.WithFields(fields).Info("Initializing node")
 
 	init := "couchbase-cli node-init -c localhost:8091 -u Administrator -p asdasd"
 	if n.blueprint.DataPath != "" {
 		init += fmt.Sprintf(" --node-init-data-path %s", n.blueprint.DataPath)
+	}
+
+	if n.blueprint.IndexPath != "" {
+		init += fmt.Sprintf(" --node-init-index-path %s", n.blueprint.IndexPath)
 	}
 
 	_, err := n.client.ExecuteCommand(value.NewCommand(init))
@@ -166,6 +204,141 @@ func (n *Node) disableCB() error {
 	_, err := n.client.ExecuteCommand(n.client.Platform.CommandDisableCouchbase())
 
 	return err
+}
+
+// loginAsRoot will attempt to login as the root user on the remote machine.
+func (n *Node) loginAsRoot() error {
+	// Become root
+	_, err := n.client.ExecuteCommand("sudo -s")
+	if err != nil {
+		log.Fatalf("failed to become root: %v", err)
+	}
+
+	// Read the authorized_keys file content
+	output, err := n.client.ExecuteCommand("sudo cat /root/.ssh/authorized_keys")
+	if err != nil {
+		log.Fatalf("failed to read authorized_keys: %v", err)
+	}
+
+	// Find the position of the first occurrence of 'ssh-rsa'
+	index := strings.Index(string(output), "ssh-rsa")
+	if index == -1 {
+		log.Fatalf("ssh-rsa not found in authorized_keys")
+	}
+
+	// Trim the content to keep only the portion starting from 'ssh-rsa'
+	newContent := output[index:]
+
+	// Write the new content back to authorized_keys
+	msg := fmt.Sprintf("echo '%s' | sudo tee /root/.ssh/authorized_keys", newContent)
+	_, err = n.client.ExecuteCommand(value.Command(msg))
+	if err != nil {
+		log.Fatalf("failed to write to authorized_keys: %v", err)
+	}
+
+	// Restart the SSH service
+	_, err = n.client.ExecuteCommand("sudo systemctl restart sshd.service || sudo systemctl restart ssh.service")
+	if err != nil {
+		log.Fatalf("failed to restart SSH service: %v", err)
+	}
+
+	return err
+}
+
+// checkAndPartitionEBS will check for an EBS volume, if it exists partition it to a "/mnt" using gdisk command with n, p and w commands then make a mkfs file structure name it /dev/nvme1n1p1 and mount /mnt on it
+func (n *Node) checkAndPartitionEBS() error {
+	log.WithField("host", n.blueprint.Host).Info("Checking and partitioning EBS volume")
+
+	checkAllVolumes := fmt.Sprintf("lsblk -o NAME,SIZE,TYPE,MOUNTPOINT")
+	allVolumes, err := n.client.ExecuteCommand(value.NewCommand(checkAllVolumes))
+	if err != nil {
+		return fmt.Errorf("failed to check for all volumes: %w", err)
+	}
+
+	volumeName, err := ExtractLastVolumeName(string(allVolumes))
+	if err != nil {
+		return fmt.Errorf("failed to extract last volume name: %w", err)
+	}
+
+	log.WithField("host", n.blueprint.Host).Info(string(volumeName))
+
+	// Check if EBS volume exists
+	checkVolume := fmt.Sprintf("lsblk | grep %s", volumeName)
+	_, err = n.client.ExecuteCommand(value.NewCommand(checkVolume))
+	if err != nil {
+		return fmt.Errorf("failed to check for EBS volume: %w", err)
+	}
+
+	partitionedVolume := fmt.Sprintf("/dev/%sp1", volumeName)
+	// Check if EBS volume is already partitioned
+	checkPartition := fmt.Sprintf("lsblk /dev/%s | grep %s", volumeName, partitionedVolume)
+	log.WithField("host", n.blueprint.Host).Info(checkPartition)
+	_, err = n.client.ExecuteCommand(value.NewCommand(checkPartition))
+	if err != nil {
+		// EBS volume is not partitioned, we can proceed with partitioning
+		partitionVolume := fmt.Sprintf("echo ',,,;' | sfdisk /dev/%s", volumeName)
+		_, err = n.client.ExecuteCommand(value.NewCommand(partitionVolume))
+		if err != nil {
+			return fmt.Errorf("failed to partition EBS volume: %w", err)
+		}
+	} else {
+		// EBS volume is already partitioned, we should not proceed with partitioning
+		log.WithField("host", n.blueprint.Host).Info("EBS volume is already partitioned, skipping partitioning")
+		return nil
+	}
+
+	// Make a mkfs file structure
+	makeFileStructure := fmt.Sprintf("mkfs.xfs /dev/%sp1", volumeName)
+	_, err = n.client.ExecuteCommand(value.NewCommand(makeFileStructure))
+	if err != nil {
+		return fmt.Errorf("failed to make mkfs file structure: %w", err)
+	}
+
+	// Mount /mnt on it
+	mountVolume := fmt.Sprintf("mount /dev/%sp1 /mnt", volumeName)
+	_, err = n.client.ExecuteCommand(value.NewCommand(mountVolume))
+	if err != nil {
+		return fmt.Errorf("failed to mount /mnt on EBS volume: %w", err)
+	}
+
+	changePermissions := "chmod 777 /mnt"
+	_, err = n.client.ExecuteCommand(value.NewCommand(changePermissions))
+	if err != nil {
+		return fmt.Errorf("failed to change permissions on /mnt: %w", err)
+	}
+
+	return nil
+}
+
+// giveCBPermissions will give the Couchbase Server user the required
+// permissions to access the data path.
+func (n *Node) giveCBPermissions() error {
+	// Run cmhod +X on EBS volume /mnt
+	changePermissions := "sudo chown -R couchbase:couchbase /mnt"
+	_, err := n.client.ExecuteCommand(value.NewCommand(changePermissions))
+	if err != nil {
+		return fmt.Errorf("failed to change permissions on /mnt: %w", err)
+	}
+
+	return nil
+}
+
+// ExtractLastVolumeName extracts the last volume name from lsblk output
+func ExtractLastVolumeName(lsblkOutput string) (string, error) {
+	lines := strings.Split(lsblkOutput, "\n")
+	var lastVolumeName string
+
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) > 2 && fields[2] == "disk" {
+			lastVolumeName = fields[0]
+		}
+	}
+
+	if lastVolumeName == "" {
+		return "", fmt.Errorf("no disk volume found in lsblk output")
+	}
+	return lastVolumeName, nil
 }
 
 // Close releases any resources in use by the connection.

@@ -33,6 +33,9 @@ type BackupClientBlueprint struct {
 	//
 	// NOTE: No validation takes place to ensure the package is valid for the current distribution; that's on you...
 	PackagePath string `yaml:"package_path,omitempty"`
+
+	// CBMPath
+	CBMPath string `yaml:"cbm_path,omitempty"`
 }
 
 // MarshalJSON returns a JSON representation of the backup blueprint which will be displayed in the report.

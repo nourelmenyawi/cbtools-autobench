@@ -60,6 +60,20 @@ func NewCluster(config *value.SSHConfig, blueprint *value.ClusterBlueprint) (*Cl
 		if err != nil {
 			return err
 		}
+		//
+		// if nodes[idx].blueprint.DataPath != "" {
+		// 	err = nodes[idx].checkAndPartitionEBS()
+		// 	if err != nil {
+		// 		return errors.Wrap(err, "failed to check and partition EBS volume")
+		// 	}
+		// }
+
+		if nodes[idx].blueprint.IndexPath != "" {
+			err = nodes[idx].checkAndPartitionEBS()
+			if err != nil {
+				return errors.Wrap(err, "failed to check and partition EBS volume")
+			}
+		}
 
 		return nil
 	}
@@ -320,6 +334,11 @@ func (c *Cluster) provisionNode(node *Node) error {
 	err = node.createDataPath()
 	if err != nil {
 		return errors.Wrap(err, "failed to create data path")
+	}
+
+	err = node.createIndexPath()
+	if err != nil {
+		return errors.Wrap(err, "failed to create index path")
 	}
 
 	err = node.initializeCB()
@@ -644,9 +663,19 @@ func (c *Cluster) serverAdd(node *Node) error {
 		return nil
 	}
 
+	var service string
+	switch {
+	case node.blueprint.DataPath != "":
+		service = "data"
+	case node.blueprint.IndexPath != "":
+		service = "search"
+	default:
+		return fmt.Errorf("node %s does not have a data or index path", node.blueprint.Host)
+	}
+
 	_, err := c.nodes[0].client.ExecuteCommand(value.NewCommand(`
 		couchbase-cli server-add -c localhost:8091 -u Administrator -p asdasd --server-add %s \
-			--server-add-username Administrator --server-add-password asdasd --services data`, node.blueprint.Host))
+			--server-add-username Administrator --server-add-password asdasd --services %s`, node.blueprint.Host, service))
 
 	return err
 }

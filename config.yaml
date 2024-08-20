@@ -1,0 +1,36 @@
+ssh:
+  username: "ec2-user"
+  private_key: "/Users/nourelmenyawi/Downloads/nour.elmenyawi.2024.pem"
+blueprint:
+  cluster:
+    package_path: "/Users/nourelmenyawi/couchbase/testing-tools/couchbase-server-enterprise-trinity-linux.x86_64.rpm"
+    nodes:
+      - host: "ec2-18-207-156-56.compute-1.amazonaws.com"
+        data_path: "/mnt/data"
+      - host: "ec2-34-224-56-177.compute-1.amazonaws.com"
+        data_path: "/mnt/data"
+      - host: "ec2-54-82-36-115.compute-1.amazonaws.com"
+        data_path: "/mnt/data"
+    bucket:
+      type: "couchbase"
+      eviction_policy: "fullEviction"
+      data:
+        data_loader: "cbbackupmgr"
+        items: 100
+        active_items: 100
+        size: 100
+        load_threads: 1
+  backup_client:
+    host: "ec2-54-82-36-115.compute-1.amazonaws.com"
+    package_path: "/Users/nourelmenyawi/couchbase/testing-tools/couchbase-server-enterprise-trinity-linux.x86_64.rpm"
+    cbm_path: "/Users/nourelmenyawi/couchbase/couchbase-server/source/backup/"
+benchmark:
+  iterations: 3
+  cbbackupmgr_config:
+    environment_variables:
+      CB_AWS_ENABLE_EC2_METADATA: true
+    repository: "repo"
+    archive: "s3://nour-test-bucket-2024/new-archive"
+    obj_staging_directory: "/mnt/staging"
+    obj_region: "us-east-1"
+    obj_auth_by_instance_metadata: true

@@ -137,6 +137,7 @@ func (c *CBMConfig) CommandConfig() Command {
 	command = c.addEncryptionArgs(command, true)
 	command = c.addPointInTimeFlag(command)
 
+	fmt.Printf("command: %s\n", command)
 	return NewCommand(command)
 }
 
@@ -161,6 +162,7 @@ func (c *CBMConfig) CommandBackup(host string, ignoreBlackhole bool) Command {
 		command = c.addBlackhole(command)
 	}
 
+	fmt.Println("command: ", command)
 	return NewCommand(command)
 }
 

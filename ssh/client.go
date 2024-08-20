@@ -17,6 +17,7 @@ package ssh
 import (
 	"fmt"
 	"net"
+	"strings"
 
 	fsutil "github.com/couchbase/tools-common/fs/util"
 	"github.com/jamesl33/cbtools-autobench/value"
@@ -63,9 +64,35 @@ func NewClient(host string, config *value.SSHConfig) (*Client, error) {
 	fields := log.Fields{"platform": platform, "host": host}
 	log.WithFields(fields).Info("Successfully established ssh connection")
 
-	return &Client{
+	if config.Username == "root" {
+		return &Client{
+			Platform: platform,
+			client:   client,
+		}, nil
+	}
+
+	ourClient := &Client{
 		Platform: platform,
 		client:   client,
+	}
+
+	err = ourClient.loginAsRoot()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to login as root")
+	}
+
+	newClient, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", host, 22), &ssh.ClientConfig{
+		User:            "root",
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: func(_ string, _ net.Addr, _ ssh.PublicKey) error { return nil },
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create ssh client")
+	}
+
+	return &Client{
+		Platform: platform,
+		client:   newClient,
 	}, nil
 }
 
@@ -78,8 +105,15 @@ func (c *Client) SecureUpload(source, sink string) error {
 		"sink":   sink,
 	}
 
+	if c.FileExists(sink) {
+		log.WithFields(fields).Debug("File already exists")
+		fmt.Println("File already exists")
+		return nil
+	}
+
 	log.WithFields(fields).Debug("Uploading file")
 
+	log.Infof("Uploading file %s to %s", source, sink)
 	session, err := c.client.NewSession()
 	if err != nil {
 		return errors.Wrap(err, "failed to create session")
@@ -197,6 +231,45 @@ func (c *Client) ExecuteCommand(command value.Command) ([]byte, error) {
 	return executeCommand(c.client, command.ToString(map[string]string{
 		"PATH": fmt.Sprintf("%s:$PATH", value.CBBinDirectory),
 	}))
+}
+
+// loginAsRoot will attempt to login as the root user on the remote machine.
+func (c *Client) loginAsRoot() error {
+	// Become root
+	_, err := c.ExecuteCommand("sudo -s")
+	if err != nil {
+		log.Fatalf("failed to become root: %v", err)
+	}
+
+	// Read the authorized_keys file content
+	output, err := c.ExecuteCommand("sudo cat /root/.ssh/authorized_keys")
+	if err != nil {
+		log.Fatalf("failed to read authorized_keys: %v", err)
+	}
+
+	// Find the position of the first occurrence of 'ssh-rsa'
+	index := strings.Index(string(output), "ssh-rsa")
+	if index == -1 {
+		log.Fatalf("ssh-rsa not found in authorized_keys")
+	}
+
+	// Trim the content to keep only the portion starting from 'ssh-rsa'
+	newContent := output[index:]
+
+	// Write the new content back to authorized_keys
+	msg := fmt.Sprintf("echo '%s' | sudo tee /root/.ssh/authorized_keys", newContent)
+	_, err = c.ExecuteCommand(value.Command(msg))
+	if err != nil {
+		log.Fatalf("failed to write to authorized_keys: %v", err)
+	}
+
+	// Restart the SSH service
+	_, err = c.ExecuteCommand("sudo systemctl restart sshd.service || sudo systemctl restart ssh.service")
+	if err != nil {
+		log.Fatalf("failed to restart SSH service: %v", err)
+	}
+
+	return err
 }
 
 // Close releases an resources in use by this client.
